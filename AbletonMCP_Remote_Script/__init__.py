@@ -2,6 +2,7 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
 from _Framework.ControlSurface import ControlSurface
+import Live
 import socket
 import json
 import threading
@@ -531,7 +532,6 @@ class AbletonMCP(ControlSurface):
             # In Live's LOM, we need to use the selection approach
             # Live 11+ has track.group_track for reading, but grouping
             # is done via the application
-            import Live
             app = Live.Application.get_application()
 
             # Select all target tracks - unfortunately the LOM doesn't
@@ -627,37 +627,36 @@ class AbletonMCP(ControlSurface):
             raise
     
     def _add_notes_to_clip(self, track_index, clip_index, notes):
-        """Add MIDI notes to a clip"""
+        """Add MIDI notes to a clip using Live 11+ API"""
         try:
             if track_index < 0 or track_index >= len(self._song.tracks):
                 raise IndexError("Track index out of range")
-            
+
             track = self._song.tracks[track_index]
-            
+
             if clip_index < 0 or clip_index >= len(track.clip_slots):
                 raise IndexError("Clip index out of range")
-            
+
             clip_slot = track.clip_slots[clip_index]
-            
+
             if not clip_slot.has_clip:
                 raise Exception("No clip in slot")
-            
+
             clip = clip_slot.clip
-            
-            # Convert note data to Live's format
+
+            # Use Live 11+ MidiNoteSpecification API
             live_notes = []
             for note in notes:
-                pitch = note.get("pitch", 60)
-                start_time = note.get("start_time", 0.0)
-                duration = note.get("duration", 0.25)
-                velocity = note.get("velocity", 100)
-                mute = note.get("mute", False)
-                
-                live_notes.append((pitch, start_time, duration, velocity, mute))
-            
-            # Add the notes
-            clip.set_notes(tuple(live_notes))
-            
+                spec = Live.Clip.MidiNoteSpecification()
+                spec.pitch = note.get("pitch", 60)
+                spec.start_time = note.get("start_time", 0.0)
+                spec.duration = note.get("duration", 0.25)
+                spec.velocity = note.get("velocity", 100)
+                spec.mute = note.get("mute", False)
+                live_notes.append(spec)
+
+            clip.add_new_notes(tuple(live_notes))
+
             result = {
                 "note_count": len(notes)
             }
@@ -667,7 +666,7 @@ class AbletonMCP(ControlSurface):
             raise
     
     def _get_clip_notes(self, track_index, clip_index):
-        """Get all MIDI notes from a clip"""
+        """Get all MIDI notes from a clip using Live 11+ API"""
         try:
             if track_index < 0 or track_index >= len(self._song.tracks):
                 raise IndexError("Track index out of range")
@@ -683,18 +682,19 @@ class AbletonMCP(ControlSurface):
                 raise Exception("No clip in slot")
 
             clip = clip_slot.clip
-            # get_notes(start_time, start_pitch, time_span, pitch_span)
-            # Use wide range to get all notes
-            notes_tuple = clip.get_notes(0.0, 0, clip.length, 128)
+            # get_notes_extended(from_pitch, pitch_span, from_time, time_span)
+            note_vector = clip.get_notes_extended(0, 128, 0.0, clip.length)
 
             notes = []
-            for note in notes_tuple:
+            for note in note_vector:
                 notes.append({
-                    "pitch": note[0],
-                    "start_time": note[1],
-                    "duration": note[2],
-                    "velocity": note[3],
-                    "mute": note[4]
+                    "pitch": note.pitch,
+                    "start_time": note.start_time,
+                    "duration": note.duration,
+                    "velocity": note.velocity,
+                    "mute": note.mute,
+                    "probability": note.probability,
+                    "note_id": note.note_id
                 })
 
             return {
@@ -707,7 +707,7 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _remove_notes_from_clip(self, track_index, clip_index, start_time, start_pitch, time_span, pitch_span):
-        """Remove notes from a clip within a specified range"""
+        """Remove notes from a clip within a specified range using Live 11+ API"""
         try:
             if track_index < 0 or track_index >= len(self._song.tracks):
                 raise IndexError("Track index out of range")
@@ -723,7 +723,8 @@ class AbletonMCP(ControlSurface):
                 raise Exception("No clip in slot")
 
             clip = clip_slot.clip
-            clip.remove_notes(start_time, start_pitch, time_span, pitch_span)
+            # remove_notes_extended(from_pitch, pitch_span, from_time, time_span)
+            clip.remove_notes_extended(start_pitch, pitch_span, start_time, time_span)
 
             return {
                 "removed_range": {
@@ -738,7 +739,7 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _replace_all_notes(self, track_index, clip_index, notes):
-        """Clear all notes in a clip and replace with new ones (atomic operation)"""
+        """Clear all notes in a clip and replace with new ones using Live 11+ API"""
         try:
             if track_index < 0 or track_index >= len(self._song.tracks):
                 raise IndexError("Track index out of range")
@@ -755,22 +756,22 @@ class AbletonMCP(ControlSurface):
 
             clip = clip_slot.clip
 
-            # Clear all existing notes
-            clip.select_all_notes()
-            clip.replace_selected_notes(tuple())
+            # Clear all existing notes using extended API
+            clip.remove_notes_extended(0, 128, 0.0, clip.length + 1.0)
 
-            # Add new notes
+            # Add new notes using MidiNoteSpecification
             live_notes = []
             for note in notes:
-                pitch = note.get("pitch", 60)
-                start_time = note.get("start_time", 0.0)
-                duration = note.get("duration", 0.25)
-                velocity = note.get("velocity", 100)
-                mute = note.get("mute", False)
-                live_notes.append((pitch, start_time, duration, velocity, mute))
+                spec = Live.Clip.MidiNoteSpecification()
+                spec.pitch = note.get("pitch", 60)
+                spec.start_time = note.get("start_time", 0.0)
+                spec.duration = note.get("duration", 0.25)
+                spec.velocity = note.get("velocity", 100)
+                spec.mute = note.get("mute", False)
+                live_notes.append(spec)
 
             if live_notes:
-                clip.set_notes(tuple(live_notes))
+                clip.add_new_notes(tuple(live_notes))
 
             return {
                 "note_count": len(live_notes)
@@ -881,14 +882,15 @@ class AbletonMCP(ControlSurface):
 
             live_notes = []
             for note in notes:
-                pitch = note.get("pitch", 60)
-                start_time = note.get("start_time", 0.0)
-                duration = note.get("duration", 0.25)
-                velocity = note.get("velocity", 100)
-                mute = note.get("mute", False)
-                live_notes.append((pitch, start_time, duration, velocity, mute))
+                spec = Live.Clip.MidiNoteSpecification()
+                spec.pitch = note.get("pitch", 60)
+                spec.start_time = note.get("start_time", 0.0)
+                spec.duration = note.get("duration", 0.25)
+                spec.velocity = note.get("velocity", 100)
+                spec.mute = note.get("mute", False)
+                live_notes.append(spec)
 
-            clip.set_notes(tuple(live_notes))
+            clip.add_new_notes(tuple(live_notes))
 
             return {
                 "note_count": len(live_notes),
@@ -919,16 +921,18 @@ class AbletonMCP(ControlSurface):
             if not clip.is_midi_clip:
                 raise Exception("Clip is not a MIDI clip")
 
-            notes_tuple = clip.get_notes(0.0, 0, clip.length, 128)
+            note_vector = clip.get_notes_extended(0, 128, 0.0, clip.length)
 
             notes = []
-            for note in notes_tuple:
+            for note in note_vector:
                 notes.append({
-                    "pitch": note[0],
-                    "start_time": note[1],
-                    "duration": note[2],
-                    "velocity": note[3],
-                    "mute": note[4]
+                    "pitch": note.pitch,
+                    "start_time": note.start_time,
+                    "duration": note.duration,
+                    "velocity": note.velocity,
+                    "mute": note.mute,
+                    "probability": note.probability,
+                    "note_id": note.note_id
                 })
 
             return {
@@ -963,22 +967,22 @@ class AbletonMCP(ControlSurface):
             if not clip.is_midi_clip:
                 raise Exception("Clip is not a MIDI clip")
 
-            # Clear existing notes
-            clip.select_all_notes()
-            clip.replace_selected_notes(tuple())
+            # Clear existing notes using extended API
+            clip.remove_notes_extended(0, 128, 0.0, clip.length + 1.0)
 
-            # Add new notes
+            # Add new notes using MidiNoteSpecification
             live_notes = []
             for note in notes:
-                pitch = note.get("pitch", 60)
-                start_time = note.get("start_time", 0.0)
-                duration = note.get("duration", 0.25)
-                velocity = note.get("velocity", 100)
-                mute = note.get("mute", False)
-                live_notes.append((pitch, start_time, duration, velocity, mute))
+                spec = Live.Clip.MidiNoteSpecification()
+                spec.pitch = note.get("pitch", 60)
+                spec.start_time = note.get("start_time", 0.0)
+                spec.duration = note.get("duration", 0.25)
+                spec.velocity = note.get("velocity", 100)
+                spec.mute = note.get("mute", False)
+                live_notes.append(spec)
 
             if live_notes:
-                clip.set_notes(tuple(live_notes))
+                clip.add_new_notes(tuple(live_notes))
 
             return {
                 "note_count": len(live_notes),
