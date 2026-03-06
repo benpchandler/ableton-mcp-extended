@@ -105,7 +105,9 @@ class AbletonConnection:
             "create_midi_track", "create_audio_track", "set_track_name",
             "create_clip", "add_notes_to_clip", "set_clip_name",
             "set_tempo", "fire_clip", "stop_clip", "set_device_parameter",
-            "start_playback", "stop_playback", "load_instrument_or_effect"
+            "start_playback", "stop_playback", "load_instrument_or_effect",
+            "delete_track", "group_tracks",
+            "remove_notes_from_clip", "replace_all_notes"
         ]
         
         try:
@@ -186,7 +188,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 # Create the MCP server with lifespan support
 mcp = FastMCP(
     "AbletonMCP",
-    description="Ableton Live integration through the Model Context Protocol",
+    instructions="Ableton Live integration through the Model Context Protocol",
     lifespan=server_lifespan
 )
 
@@ -406,6 +408,122 @@ def set_tempo(ctx: Context, tempo: float) -> str:
         logger.error(f"Error setting tempo: {str(e)}")
         return f"Error setting tempo: {str(e)}"
 
+
+@mcp.tool()
+def delete_track(ctx: Context, track_index: int) -> str:
+    """
+    Delete a track from the Ableton session.
+
+    Parameters:
+    - track_index: The index of the track to delete
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("delete_track", {"track_index": track_index})
+        return f"Deleted track {result.get('deleted_index', track_index)} ('{result.get('deleted_name', 'unknown')}')"
+    except Exception as e:
+        logger.error(f"Error deleting track: {str(e)}")
+        return f"Error deleting track: {str(e)}"
+
+@mcp.tool()
+def group_tracks(ctx: Context, track_indices: List[int]) -> str:
+    """
+    Group contiguous tracks into a group track.
+
+    Parameters:
+    - track_indices: List of contiguous track indices to group (e.g. [1, 2, 3])
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("group_tracks", {"track_indices": track_indices})
+        return (f"Created group '{result.get('group_track_name', 'Group')}' at index {result.get('group_track_index', 0)} "
+                f"with {result.get('grouped_track_count', 0)} tracks")
+    except Exception as e:
+        logger.error(f"Error grouping tracks: {str(e)}")
+        return f"Error grouping tracks: {str(e)}"
+
+@mcp.tool()
+def get_clip_notes(ctx: Context, track_index: int, clip_index: int) -> str:
+    """
+    Get all MIDI notes from a clip.
+
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the clip slot containing the clip
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_clip_notes", {
+            "track_index": track_index,
+            "clip_index": clip_index
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting clip notes: {str(e)}")
+        return f"Error getting clip notes: {str(e)}"
+
+@mcp.tool()
+def remove_notes_from_clip(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    start_time: float = 0.0,
+    start_pitch: int = 0,
+    time_span: float = 9999.0,
+    pitch_span: int = 128
+) -> str:
+    """
+    Remove notes from a clip within a specified range. Defaults remove ALL notes.
+
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the clip slot containing the clip
+    - start_time: Start time in beats (default: 0.0)
+    - start_pitch: Start pitch as MIDI note number (default: 0)
+    - time_span: Time range in beats (default: 9999.0 = all)
+    - pitch_span: Pitch range (default: 128 = all)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("remove_notes_from_clip", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "start_time": start_time,
+            "start_pitch": start_pitch,
+            "time_span": time_span,
+            "pitch_span": pitch_span
+        })
+        return f"Removed notes from clip at track {track_index}, slot {clip_index}"
+    except Exception as e:
+        logger.error(f"Error removing notes from clip: {str(e)}")
+        return f"Error removing notes from clip: {str(e)}"
+
+@mcp.tool()
+def replace_all_notes(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    notes: List[Dict[str, Union[int, float, bool]]]
+) -> str:
+    """
+    Clear all notes in a clip and replace with new ones (atomic operation).
+
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the clip slot containing the clip
+    - notes: List of note dictionaries, each with pitch, start_time, duration, velocity, and mute
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("replace_all_notes", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "notes": notes
+        })
+        return f"Replaced all notes in clip at track {track_index}, slot {clip_index} with {len(notes)} new notes"
+    except Exception as e:
+        logger.error(f"Error replacing notes in clip: {str(e)}")
+        return f"Error replacing notes in clip: {str(e)}"
 
 @mcp.tool()
 def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:

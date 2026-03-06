@@ -226,10 +226,12 @@ class AbletonMCP(ControlSurface):
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
             # Commands that modify Live's state should be scheduled on the main thread
-            elif command_type in ["create_midi_track", "set_track_name", 
-                                 "create_clip", "add_notes_to_clip", "set_clip_name", 
+            elif command_type in ["create_midi_track", "set_track_name",
+                                 "create_clip", "add_notes_to_clip", "set_clip_name",
                                  "set_tempo", "fire_clip", "stop_clip",
-                                 "start_playback", "stop_playback", "load_browser_item"]:
+                                 "start_playback", "stop_playback", "load_browser_item",
+                                 "delete_track", "group_tracks",
+                                 "get_clip_notes", "remove_notes_from_clip", "replace_all_notes"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -282,7 +284,30 @@ class AbletonMCP(ControlSurface):
                             track_index = params.get("track_index", 0)
                             item_uri = params.get("item_uri", "")
                             result = self._load_browser_item(track_index, item_uri)
-                        
+                        elif command_type == "delete_track":
+                            track_index = params.get("track_index", 0)
+                            result = self._delete_track(track_index)
+                        elif command_type == "group_tracks":
+                            track_indices = params.get("track_indices", [])
+                            result = self._group_tracks(track_indices)
+                        elif command_type == "get_clip_notes":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            result = self._get_clip_notes(track_index, clip_index)
+                        elif command_type == "remove_notes_from_clip":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            start_time = params.get("start_time", 0.0)
+                            start_pitch = params.get("start_pitch", 0)
+                            time_span = params.get("time_span", 9999.0)
+                            pitch_span = params.get("pitch_span", 128)
+                            result = self._remove_notes_from_clip(track_index, clip_index, start_time, start_pitch, time_span, pitch_span)
+                        elif command_type == "replace_all_notes":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            notes = params.get("notes", [])
+                            result = self._replace_all_notes(track_index, clip_index, notes)
+
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
                     except Exception as e:
@@ -432,8 +457,92 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error creating MIDI track: " + str(e))
             raise
-    
-    
+
+    def _delete_track(self, track_index):
+        """Delete a track at the specified index"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range: " + str(track_index))
+
+            track = self._song.tracks[track_index]
+            name = track.name
+            self._song.delete_track(track_index)
+
+            return {
+                "deleted_index": track_index,
+                "deleted_name": name
+            }
+        except Exception as e:
+            self.log_message("Error deleting track: " + str(e))
+            raise
+
+    def _group_tracks(self, track_indices):
+        """Group tracks by selecting them and using Live's grouping"""
+        try:
+            if not track_indices or len(track_indices) < 1:
+                raise ValueError("Must provide at least one track index to group")
+
+            tracks = self._song.tracks
+            for idx in track_indices:
+                if idx < 0 or idx >= len(tracks):
+                    raise IndexError("Track index out of range: " + str(idx))
+
+            # Select the first track, then add others to selection
+            # Live groups whatever is selected when you call the API
+            first_track = tracks[track_indices[0]]
+            self._song.view.selected_track = first_track
+
+            # In Live's LOM, we need to use the selection approach
+            # Live 11+ has track.group_track for reading, but grouping
+            # is done via the application
+            import Live
+            app = Live.Application.get_application()
+
+            # Select all target tracks - unfortunately the LOM doesn't
+            # have a multi-select API, so we select the range and group
+            # For contiguous tracks, we can select first, shift-select last
+            # But programmatically, the best approach is:
+            # 1. Select first track
+            # 2. Move tracks to be contiguous if needed
+            # 3. Use song.create_group_track() if available (Live 11.1+)
+
+            # Ensure tracks are contiguous
+            sorted_indices = sorted(track_indices)
+            for i in range(1, len(sorted_indices)):
+                if sorted_indices[i] != sorted_indices[i-1] + 1:
+                    raise ValueError("Tracks must be contiguous to group. Indices: " + str(sorted_indices))
+
+            # Select the range of tracks
+            self._song.view.selected_track = tracks[sorted_indices[0]]
+
+            # Use Live's built-in track grouping
+            # In Live 11+, we can iterate and set is_part_of_selection
+            try:
+                # Try the direct approach: select tracks and trigger grouping
+                for idx in sorted_indices:
+                    tracks[idx].is_part_of_selection = True
+
+                # Trigger group creation
+                app.get_document().create_group_track()
+            except AttributeError:
+                # Fallback: try the song-level API
+                try:
+                    self._song.create_group_track(sorted_indices[0], sorted_indices[-1] + 1)
+                except Exception:
+                    raise Exception("Track grouping requires Live 11.1+. Please group manually with Cmd+G.")
+
+            # Find the new group track (it's inserted before the first grouped track)
+            group_track = self._song.tracks[sorted_indices[0]]
+
+            return {
+                "group_track_index": sorted_indices[0],
+                "group_track_name": group_track.name,
+                "grouped_track_count": len(sorted_indices)
+            }
+        except Exception as e:
+            self.log_message("Error grouping tracks: " + str(e))
+            raise
+
     def _set_track_name(self, track_index, name):
         """Set the name of a track"""
         try:
@@ -521,6 +630,119 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error adding notes to clip: " + str(e))
             raise
     
+    def _get_clip_notes(self, track_index, clip_index):
+        """Get all MIDI notes from a clip"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+
+            clip_slot = track.clip_slots[clip_index]
+
+            if not clip_slot.has_clip:
+                raise Exception("No clip in slot")
+
+            clip = clip_slot.clip
+            # get_notes(start_time, start_pitch, time_span, pitch_span)
+            # Use wide range to get all notes
+            notes_tuple = clip.get_notes(0.0, 0, clip.length, 128)
+
+            notes = []
+            for note in notes_tuple:
+                notes.append({
+                    "pitch": note[0],
+                    "start_time": note[1],
+                    "duration": note[2],
+                    "velocity": note[3],
+                    "mute": note[4]
+                })
+
+            return {
+                "clip_length": clip.length,
+                "note_count": len(notes),
+                "notes": notes
+            }
+        except Exception as e:
+            self.log_message("Error getting clip notes: " + str(e))
+            raise
+
+    def _remove_notes_from_clip(self, track_index, clip_index, start_time, start_pitch, time_span, pitch_span):
+        """Remove notes from a clip within a specified range"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+
+            clip_slot = track.clip_slots[clip_index]
+
+            if not clip_slot.has_clip:
+                raise Exception("No clip in slot")
+
+            clip = clip_slot.clip
+            clip.remove_notes(start_time, start_pitch, time_span, pitch_span)
+
+            return {
+                "removed_range": {
+                    "start_time": start_time,
+                    "start_pitch": start_pitch,
+                    "time_span": time_span,
+                    "pitch_span": pitch_span
+                }
+            }
+        except Exception as e:
+            self.log_message("Error removing notes from clip: " + str(e))
+            raise
+
+    def _replace_all_notes(self, track_index, clip_index, notes):
+        """Clear all notes in a clip and replace with new ones (atomic operation)"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+
+            clip_slot = track.clip_slots[clip_index]
+
+            if not clip_slot.has_clip:
+                raise Exception("No clip in slot")
+
+            clip = clip_slot.clip
+
+            # Clear all existing notes
+            clip.select_all_notes()
+            clip.replace_selected_notes(tuple())
+
+            # Add new notes
+            live_notes = []
+            for note in notes:
+                pitch = note.get("pitch", 60)
+                start_time = note.get("start_time", 0.0)
+                duration = note.get("duration", 0.25)
+                velocity = note.get("velocity", 100)
+                mute = note.get("mute", False)
+                live_notes.append((pitch, start_time, duration, velocity, mute))
+
+            if live_notes:
+                clip.set_notes(tuple(live_notes))
+
+            return {
+                "note_count": len(live_notes)
+            }
+        except Exception as e:
+            self.log_message("Error replacing notes in clip: " + str(e))
+            raise
+
     def _set_clip_name(self, track_index, clip_index, name):
         """Set the name of a clip"""
         try:
