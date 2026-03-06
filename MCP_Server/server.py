@@ -107,7 +107,10 @@ class AbletonConnection:
             "set_tempo", "fire_clip", "stop_clip", "set_device_parameter",
             "start_playback", "stop_playback", "load_instrument_or_effect",
             "delete_track", "group_tracks",
-            "remove_notes_from_clip", "replace_all_notes"
+            "remove_notes_from_clip", "replace_all_notes",
+            "create_arrangement_clip", "add_notes_to_arrangement_clip",
+            "replace_arrangement_clip_notes",
+            "duplicate_clip_to_arrangement", "delete_arrangement_clip"
         ]
         
         try:
@@ -524,6 +527,171 @@ def replace_all_notes(
     except Exception as e:
         logger.error(f"Error replacing notes in clip: {str(e)}")
         return f"Error replacing notes in clip: {str(e)}"
+
+# ── Arrangement View Tools ────────────────────────────────────────────
+
+@mcp.tool()
+def get_arrangement_clips(ctx: Context, track_index: int) -> str:
+    """
+    Get all clips in the arrangement view for a track.
+
+    Parameters:
+    - track_index: The index of the track
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_arrangement_clips", {
+            "track_index": track_index
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting arrangement clips: {str(e)}")
+        return f"Error getting arrangement clips: {str(e)}"
+
+@mcp.tool()
+def create_arrangement_clip(ctx: Context, track_index: int, start_time: float, length: float = 4.0) -> str:
+    """
+    Create an empty MIDI clip in the arrangement view at a specific position.
+
+    Parameters:
+    - track_index: The index of the MIDI track
+    - start_time: Position in beats where the clip starts (e.g. 0.0 = bar 1, 4.0 = bar 2, 8.0 = bar 3)
+    - length: Length of the clip in beats (default: 4.0 = 1 bar in 4/4)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("create_arrangement_clip", {
+            "track_index": track_index,
+            "start_time": start_time,
+            "length": length
+        })
+        return f"Created arrangement clip at beat {start_time}, length {length} beats: {json.dumps(result)}"
+    except Exception as e:
+        logger.error(f"Error creating arrangement clip: {str(e)}")
+        return f"Error creating arrangement clip: {str(e)}"
+
+@mcp.tool()
+def add_notes_to_arrangement_clip(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    notes: List[Dict[str, Union[int, float, bool]]]
+) -> str:
+    """
+    Add MIDI notes to an arrangement clip.
+
+    Parameters:
+    - track_index: The index of the track
+    - clip_index: The index of the arrangement clip (from get_arrangement_clips)
+    - notes: List of note dicts with pitch, start_time, duration, velocity, mute
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("add_notes_to_arrangement_clip", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "notes": notes
+        })
+        return f"Added {len(notes)} notes to arrangement clip {clip_index}: {json.dumps(result)}"
+    except Exception as e:
+        logger.error(f"Error adding notes to arrangement clip: {str(e)}")
+        return f"Error adding notes to arrangement clip: {str(e)}"
+
+@mcp.tool()
+def get_arrangement_clip_notes(ctx: Context, track_index: int, clip_index: int) -> str:
+    """
+    Get all MIDI notes from an arrangement clip.
+
+    Parameters:
+    - track_index: The index of the track
+    - clip_index: The index of the arrangement clip (from get_arrangement_clips)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_arrangement_clip_notes", {
+            "track_index": track_index,
+            "clip_index": clip_index
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting arrangement clip notes: {str(e)}")
+        return f"Error getting arrangement clip notes: {str(e)}"
+
+@mcp.tool()
+def replace_arrangement_clip_notes(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    notes: List[Dict[str, Union[int, float, bool]]]
+) -> str:
+    """
+    Clear all notes in an arrangement clip and replace with new ones.
+
+    Parameters:
+    - track_index: The index of the track
+    - clip_index: The index of the arrangement clip (from get_arrangement_clips)
+    - notes: List of note dicts with pitch, start_time, duration, velocity, mute
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("replace_arrangement_clip_notes", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "notes": notes
+        })
+        return f"Replaced notes in arrangement clip {clip_index} with {len(notes)} new notes"
+    except Exception as e:
+        logger.error(f"Error replacing arrangement clip notes: {str(e)}")
+        return f"Error replacing arrangement clip notes: {str(e)}"
+
+@mcp.tool()
+def duplicate_clip_to_arrangement(
+    ctx: Context,
+    track_index: int,
+    clip_slot_index: int,
+    destination_time: float
+) -> str:
+    """
+    Duplicate a session view clip to the arrangement view at a specific time.
+
+    Parameters:
+    - track_index: The index of the track containing the session clip
+    - clip_slot_index: The index of the session clip slot to duplicate from
+    - destination_time: Position in beats where the clip should be placed in arrangement
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("duplicate_clip_to_arrangement", {
+            "track_index": track_index,
+            "clip_slot_index": clip_slot_index,
+            "destination_time": destination_time
+        })
+        return (f"Duplicated '{result.get('source_clip', 'clip')}' to arrangement at beat {destination_time} "
+                f"(length: {result.get('clip_length', '?')} beats)")
+    except Exception as e:
+        logger.error(f"Error duplicating clip to arrangement: {str(e)}")
+        return f"Error duplicating clip to arrangement: {str(e)}"
+
+@mcp.tool()
+def delete_arrangement_clip(ctx: Context, track_index: int, clip_index: int) -> str:
+    """
+    Delete a clip from the arrangement view.
+
+    Parameters:
+    - track_index: The index of the track
+    - clip_index: The index of the arrangement clip (from get_arrangement_clips)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("delete_arrangement_clip", {
+            "track_index": track_index,
+            "clip_index": clip_index
+        })
+        return f"Deleted arrangement clip '{result.get('deleted_clip', 'unknown')}' at index {clip_index}"
+    except Exception as e:
+        logger.error(f"Error deleting arrangement clip: {str(e)}")
+        return f"Error deleting arrangement clip: {str(e)}"
+
 
 @mcp.tool()
 def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:

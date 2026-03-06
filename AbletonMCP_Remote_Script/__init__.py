@@ -231,7 +231,11 @@ class AbletonMCP(ControlSurface):
                                  "set_tempo", "fire_clip", "stop_clip",
                                  "start_playback", "stop_playback", "load_browser_item",
                                  "delete_track", "group_tracks",
-                                 "get_clip_notes", "remove_notes_from_clip", "replace_all_notes"]:
+                                 "get_clip_notes", "remove_notes_from_clip", "replace_all_notes",
+                                 "get_arrangement_clips", "create_arrangement_clip",
+                                 "add_notes_to_arrangement_clip", "get_arrangement_clip_notes",
+                                 "replace_arrangement_clip_notes",
+                                 "duplicate_clip_to_arrangement", "delete_arrangement_clip"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -307,6 +311,38 @@ class AbletonMCP(ControlSurface):
                             clip_index = params.get("clip_index", 0)
                             notes = params.get("notes", [])
                             result = self._replace_all_notes(track_index, clip_index, notes)
+                        # Arrangement view commands
+                        elif command_type == "get_arrangement_clips":
+                            track_index = params.get("track_index", 0)
+                            result = self._get_arrangement_clips(track_index)
+                        elif command_type == "create_arrangement_clip":
+                            track_index = params.get("track_index", 0)
+                            start_time = params.get("start_time", 0.0)
+                            length = params.get("length", 4.0)
+                            result = self._create_arrangement_clip(track_index, start_time, length)
+                        elif command_type == "add_notes_to_arrangement_clip":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            notes = params.get("notes", [])
+                            result = self._add_notes_to_arrangement_clip(track_index, clip_index, notes)
+                        elif command_type == "get_arrangement_clip_notes":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            result = self._get_arrangement_clip_notes(track_index, clip_index)
+                        elif command_type == "replace_arrangement_clip_notes":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            notes = params.get("notes", [])
+                            result = self._replace_arrangement_clip_notes(track_index, clip_index, notes)
+                        elif command_type == "duplicate_clip_to_arrangement":
+                            track_index = params.get("track_index", 0)
+                            clip_slot_index = params.get("clip_slot_index", 0)
+                            destination_time = params.get("destination_time", 0.0)
+                            result = self._duplicate_clip_to_arrangement(track_index, clip_slot_index, destination_time)
+                        elif command_type == "delete_arrangement_clip":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            result = self._delete_arrangement_clip(track_index, clip_index)
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -741,6 +777,275 @@ class AbletonMCP(ControlSurface):
             }
         except Exception as e:
             self.log_message("Error replacing notes in clip: " + str(e))
+            raise
+
+    # ── Arrangement View ──────────────────────────────────────────────
+
+    def _get_arrangement_clips(self, track_index):
+        """Get all arrangement clips on a track (Live 11+)"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            try:
+                arr_clips = track.arrangement_clips
+            except AttributeError:
+                raise Exception("arrangement_clips not available — requires Live 11+")
+
+            clips = []
+            for i, clip in enumerate(arr_clips):
+                clip_info = {
+                    "index": i,
+                    "name": clip.name,
+                    "start_time": clip.start_time,
+                    "end_time": clip.end_time,
+                    "length": clip.length,
+                    "is_midi_clip": clip.is_midi_clip,
+                    "is_audio_clip": clip.is_audio_clip,
+                }
+                if clip.is_midi_clip:
+                    clip_info["is_playing"] = clip.is_playing
+                clips.append(clip_info)
+
+            return {
+                "track_index": track_index,
+                "track_name": track.name,
+                "clip_count": len(clips),
+                "clips": clips
+            }
+        except Exception as e:
+            self.log_message("Error getting arrangement clips: " + str(e))
+            raise
+
+    def _create_arrangement_clip(self, track_index, start_time, length):
+        """Create an empty MIDI clip in the arrangement view"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if not track.has_midi_input:
+                raise Exception("Track is not a MIDI track")
+
+            # LOM: track.create_midi_clip(start_time, length)
+            track.create_midi_clip(start_time, length)
+
+            # Find the newly created clip in arrangement_clips
+            try:
+                arr_clips = track.arrangement_clips
+                # The new clip should be at the position we specified
+                for clip in arr_clips:
+                    if abs(clip.start_time - start_time) < 0.01:
+                        return {
+                            "name": clip.name,
+                            "start_time": clip.start_time,
+                            "length": clip.length,
+                            "arrangement_clip_index": list(arr_clips).index(clip)
+                        }
+            except AttributeError:
+                pass
+
+            return {
+                "start_time": start_time,
+                "length": length,
+                "message": "Clip created (could not verify — arrangement_clips may require Live 11+)"
+            }
+        except Exception as e:
+            self.log_message("Error creating arrangement clip: " + str(e))
+            raise
+
+    def _add_notes_to_arrangement_clip(self, track_index, clip_index, notes):
+        """Add MIDI notes to an arrangement clip"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            try:
+                arr_clips = track.arrangement_clips
+            except AttributeError:
+                raise Exception("arrangement_clips not available — requires Live 11+")
+
+            if clip_index < 0 or clip_index >= len(arr_clips):
+                raise IndexError("Arrangement clip index out of range: " + str(clip_index) +
+                                 " (track has " + str(len(arr_clips)) + " arrangement clips)")
+
+            clip = arr_clips[clip_index]
+
+            if not clip.is_midi_clip:
+                raise Exception("Clip is not a MIDI clip")
+
+            live_notes = []
+            for note in notes:
+                pitch = note.get("pitch", 60)
+                start_time = note.get("start_time", 0.0)
+                duration = note.get("duration", 0.25)
+                velocity = note.get("velocity", 100)
+                mute = note.get("mute", False)
+                live_notes.append((pitch, start_time, duration, velocity, mute))
+
+            clip.set_notes(tuple(live_notes))
+
+            return {
+                "note_count": len(live_notes),
+                "clip_name": clip.name
+            }
+        except Exception as e:
+            self.log_message("Error adding notes to arrangement clip: " + str(e))
+            raise
+
+    def _get_arrangement_clip_notes(self, track_index, clip_index):
+        """Get all MIDI notes from an arrangement clip"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            try:
+                arr_clips = track.arrangement_clips
+            except AttributeError:
+                raise Exception("arrangement_clips not available — requires Live 11+")
+
+            if clip_index < 0 or clip_index >= len(arr_clips):
+                raise IndexError("Arrangement clip index out of range")
+
+            clip = arr_clips[clip_index]
+
+            if not clip.is_midi_clip:
+                raise Exception("Clip is not a MIDI clip")
+
+            notes_tuple = clip.get_notes(0.0, 0, clip.length, 128)
+
+            notes = []
+            for note in notes_tuple:
+                notes.append({
+                    "pitch": note[0],
+                    "start_time": note[1],
+                    "duration": note[2],
+                    "velocity": note[3],
+                    "mute": note[4]
+                })
+
+            return {
+                "clip_name": clip.name,
+                "clip_start_time": clip.start_time,
+                "clip_length": clip.length,
+                "note_count": len(notes),
+                "notes": notes
+            }
+        except Exception as e:
+            self.log_message("Error getting arrangement clip notes: " + str(e))
+            raise
+
+    def _replace_arrangement_clip_notes(self, track_index, clip_index, notes):
+        """Clear and replace all notes in an arrangement clip"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            try:
+                arr_clips = track.arrangement_clips
+            except AttributeError:
+                raise Exception("arrangement_clips not available — requires Live 11+")
+
+            if clip_index < 0 or clip_index >= len(arr_clips):
+                raise IndexError("Arrangement clip index out of range")
+
+            clip = arr_clips[clip_index]
+
+            if not clip.is_midi_clip:
+                raise Exception("Clip is not a MIDI clip")
+
+            # Clear existing notes
+            clip.select_all_notes()
+            clip.replace_selected_notes(tuple())
+
+            # Add new notes
+            live_notes = []
+            for note in notes:
+                pitch = note.get("pitch", 60)
+                start_time = note.get("start_time", 0.0)
+                duration = note.get("duration", 0.25)
+                velocity = note.get("velocity", 100)
+                mute = note.get("mute", False)
+                live_notes.append((pitch, start_time, duration, velocity, mute))
+
+            if live_notes:
+                clip.set_notes(tuple(live_notes))
+
+            return {
+                "note_count": len(live_notes),
+                "clip_name": clip.name
+            }
+        except Exception as e:
+            self.log_message("Error replacing arrangement clip notes: " + str(e))
+            raise
+
+    def _duplicate_clip_to_arrangement(self, track_index, clip_slot_index, destination_time):
+        """Duplicate a session clip to the arrangement at a given time"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if clip_slot_index < 0 or clip_slot_index >= len(track.clip_slots):
+                raise IndexError("Clip slot index out of range")
+
+            clip_slot = track.clip_slots[clip_slot_index]
+
+            if not clip_slot.has_clip:
+                raise Exception("No clip in session slot " + str(clip_slot_index))
+
+            clip = clip_slot.clip
+
+            # LOM: track.duplicate_clip_to_arrangement(clip, destination_time)
+            track.duplicate_clip_to_arrangement(clip, destination_time)
+
+            return {
+                "source_clip": clip.name,
+                "destination_time": destination_time,
+                "clip_length": clip.length
+            }
+        except Exception as e:
+            self.log_message("Error duplicating clip to arrangement: " + str(e))
+            raise
+
+    def _delete_arrangement_clip(self, track_index, clip_index):
+        """Delete an arrangement clip"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            try:
+                arr_clips = track.arrangement_clips
+            except AttributeError:
+                raise Exception("arrangement_clips not available — requires Live 11+")
+
+            if clip_index < 0 or clip_index >= len(arr_clips):
+                raise IndexError("Arrangement clip index out of range")
+
+            clip = arr_clips[clip_index]
+            clip_name = clip.name
+
+            # LOM: track.delete_clip(clip)
+            track.delete_clip(clip)
+
+            return {
+                "deleted_clip": clip_name,
+                "deleted_index": clip_index
+            }
+        except Exception as e:
+            self.log_message("Error deleting arrangement clip: " + str(e))
             raise
 
     def _set_clip_name(self, track_index, clip_index, name):
